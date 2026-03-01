@@ -1,4 +1,4 @@
 ecdsa==0.19.0
 cryptography==42.0.5
-eciespy==0.3.15
-secretsharing==0.2.7
+eciespy
+secretsharing

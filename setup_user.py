@@ -1,5 +1,7 @@
 import os
 import base64
+import json
+from crypto_engine import sign_message
 from ecdsa import SigningKey, SECP256k1
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -10,7 +12,6 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 # ==========================================
 # We define exactly where we want these files to go
 KEY_DIRECTORY = "data/keys"
-
 
 # ==========================================
 # PASSWORD LOCKING SYSTEM
@@ -31,6 +32,8 @@ def lock_with_password(password, data_to_lock):
 # GENERATE AND SAVE KEYS TO FOLDER
 # ==========================================
 def register_secure_user(user_id, password):
+    user_id = user_id.replace("/", "_")
+    
     print(f"Generating cryptographic identity for {user_id}...")
 
     # --- NEW: CREATE THE DIRECTORY ---
@@ -61,6 +64,36 @@ def register_secure_user(user_id, password):
     print(f"✅ Success! Keys securely saved inside the '{KEY_DIRECTORY}' folder.")
     print(f"   -> {private_filepath} (Locked)")
     print(f"   -> {public_filepath} (Public)")
+
+
+def load_private_key(user_id, password):
+    # Sanitize ID to match the saving logic
+    safe_user_id = user_id.replace("/", "_")
+    private_filepath = os.path.join(KEY_DIRECTORY, f"{safe_user_id}_private.pem")
+    
+    if not os.path.exists(private_filepath):
+        print("❌ Error: Private key file not found.")
+        return None
+
+    with open(private_filepath, "rb") as f:
+        locked_data = f.read()
+
+    try:
+        # Decrypt using the same logic used for locking
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b'cseps_project_salt',
+            iterations=100000,
+        )
+        strong_key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        fernet = Fernet(strong_key)
+        
+        decrypted_pem = fernet.decrypt(locked_data)
+        return SigningKey.from_pem(decrypted_pem)
+    except Exception:
+        print("❌ Error: Incorrect password or corrupted key file.")
+        return None
 
 
 # ==========================================

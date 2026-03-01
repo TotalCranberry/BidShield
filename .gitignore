@@ -1,0 +1,6 @@
+data?bid.json
+data
+venv
+__pycache__
+.vscode
+requirements.txt

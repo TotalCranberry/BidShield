@@ -1,6 +1,7 @@
 import sys
 # This pulls the registration function from the file we built earlier!
 from setup_user import register_secure_user
+from admin import initialize_procurement, submit_bid, close_bidding_and_decrypt, split_admin_key
 
 
 # ==========================================
@@ -36,14 +37,14 @@ def bidder_menu():
     while True:
         print("\n--- 👤 BIDDER PORTAL ---")
         print("1. Register New Bidder Identity (Generate Keys)")
-        print("2. Submit a Secure Bid (Coming Soon)")
+        print("2. Submit a Secure Bid")
         print("3. Return to Main Menu")
 
         choice = input("Select an option (1-3): ")
 
         if choice == '1':
             print("\n--- IDENTITY REGISTRATION ---")
-            user_id = input("Enter your Student/Company ID (e.g., S/20/335): ")
+            user_id = input("Enter your Student/Company ID (e.g., S20335): ")
 
             # NEW: Password Verification Loop
             while True:
@@ -61,7 +62,7 @@ def bidder_menu():
             register_secure_user(user_id, password)
 
         elif choice == '2':
-            print("\n🚧 Bidding feature is under construction! We will connect this soon.")
+            submit_bid()
         elif choice == '3':
             break  # This breaks out of the Bidder Menu and returns to the Main Menu
         else:
@@ -87,9 +88,10 @@ def admin_menu():
         choice = input("Select an option (1-3): ")
 
         if choice == '1':
-            print("\n🚧 Feature coming tomorrow: We will generate the Admin's Master Key here.")
+            initialize_procurement()
+            split_admin_key()
         elif choice == '2':
-            print("\n🚧 Feature coming tomorrow: We will implement multi-party decryption here.")
+            close_bidding_and_decrypt()
         elif choice == '3':
             break  # Returns to Main Menu
         else:
