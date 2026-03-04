@@ -6,88 +6,192 @@ from secretsharing import HexToHexSecretSharer
 from crypto_engine import sign_message, create_keys
 from setup_user import load_private_key
 
-BID_STORAGE = "data/bid.json"
-ADMIN_KEY_DIR = "data/admin"
-STATE_FILE = "data/procurement_state.json"
+DATA_DIR = "data/procurements"
+
 
 # ==========================================
-# PROCUREMENT STATE HELPERS
+# PROCUREMENT REGISTRY HELPERS
+# Each procurement lives in its own folder:
+#   data/procurements/<proc_id>/
+#       meta.json          (name, status, created)
+#       admin_public.pem   (used by bidders to encrypt)
+#       admin_private.pem  (deleted after key split)
+#       bids.json          (encrypted bid ledger)
 # ==========================================
+
+def _proc_dir(proc_id):
+    return os.path.join(DATA_DIR, proc_id)
+
+def _meta_path(proc_id):
+    return os.path.join(_proc_dir(proc_id), "meta.json")
+
+def _load_meta(proc_id):
+    with open(_meta_path(proc_id), "r") as f:
+        return json.load(f)
+
+def _save_meta(proc_id, meta):
+    with open(_meta_path(proc_id), "w") as f:
+        json.dump(meta, f, indent=4)
+
+def list_procurements():
+    """Return list of all procurement meta dicts, sorted by creation time."""
+    if not os.path.exists(DATA_DIR):
+        return []
+    procs = []
+    for proc_id in os.listdir(DATA_DIR):
+        meta_file = _meta_path(proc_id)
+        if os.path.exists(meta_file):
+            meta = _load_meta(proc_id)
+            meta["id"] = proc_id
+            procs.append(meta)
+    procs.sort(key=lambda x: x.get("created", ""))
+    return procs
+
+def list_open_procurements():
+    return [p for p in list_procurements() if p["status"] == "open"]
+
 def get_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    return {"status": "none"}  # possible: "none", "open", "closed"
-
-def set_state(status):
-    os.makedirs("data", exist_ok=True)
-    with open(STATE_FILE, "w") as f:
-        json.dump({"status": status}, f)
+    """Legacy-compatible: summarise overall system state for main menu banner."""
+    procs = list_procurements()
+    if not procs:
+        return {"status": "none"}
+    if any(p["status"] == "open" for p in procs):
+        return {"status": "open"}
+    if any(p["status"] == "closed" for p in procs):
+        return {"status": "closed"}
+    return {"status": "none"}
 
 def print_status_banner():
-    state = get_state()
-    status = state.get("status", "none")
-    if status == "none":
-        label = "No Active Procurement"
-    elif status == "open":
-        label = "Bidding is OPEN"
-    elif status == "closed":
-        label = "Bidding is CLOSED"
-    print(f"\n  Current Status: {label}")
+    procs = list_procurements()
+    if not procs:
+        print("  No procurements created yet.")
+        return
+    for p in procs:
+        if p["status"] == "open":
+            icon = "🟢"
+        elif p["status"] == "closed":
+            icon = "🔴"
+        else:
+            icon = "⚪"
+        print(f"  {icon} [{p['id']}] {p['name']}  ({p['status'].upper()})")
 
 
 # ==========================================
-# INITIALIZE PROCUREMENT
+# INITIALIZE A NEW PROCUREMENT
 # ==========================================
 def initialize_procurement():
-    state = get_state()
+    print("\n--- NEW PROCUREMENT SETUP ---")
 
-    if state["status"] == "open":
-        print("\n  WARNING: A procurement session is already active and bidding is OPEN.")
-        print("   Initializing again would generate a NEW key, making all existing bids unreadable.")
-        confirm = input("   Type CONFIRM to wipe and restart, or anything else to cancel: ").strip()
-        if confirm != "CONFIRM":
-            print("Initialization cancelled. Existing session preserved.")
-            return
+    name = input("Enter a name for this procurement (e.g. 'Road Construction Tender'): ").strip()
+    if not name:
+        print("Procurement name cannot be empty.")
+        return
 
-    elif state["status"] == "closed":
-        print("\n  WARNING: A previous procurement session exists (bidding closed).")
-        confirm = input("   Type CONFIRM to start a fresh session, or anything else to cancel: ").strip()
-        if confirm != "CONFIRM":
-            print("Initialization cancelled.")
-            return
+    # Build a safe folder ID from the name
+    import re
+    from datetime import datetime
+    safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", name)[:30]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    proc_id = f"{safe_id}_{timestamp}"
+    proc_dir = _proc_dir(proc_id)
 
-    print("\n--- INITIALIZING PROCUREMENT SESSION ---")
-    os.makedirs(ADMIN_KEY_DIR, exist_ok=True)
+    os.makedirs(proc_dir, exist_ok=True)
 
-    if os.path.exists(BID_STORAGE):
-        os.remove(BID_STORAGE)
-        print("Previous bid ledger cleared.")
-
+    # Generate keys
     admin_private, admin_public = create_keys()
 
-    with open(os.path.join(ADMIN_KEY_DIR, "admin_public.pem"), "wb") as f:
+    with open(os.path.join(proc_dir, "admin_public.pem"), "wb") as f:
         f.write(admin_public.to_pem())
 
-    with open(os.path.join(ADMIN_KEY_DIR, "admin_private.pem"), "wb") as f:
+    with open(os.path.join(proc_dir, "admin_private.pem"), "wb") as f:
         f.write(admin_private.to_pem())
 
-    print("Success! Admin identity established.")
-    print(f"   -> Public key saved to {ADMIN_KEY_DIR}/admin_public.pem")
+    # Save metadata
+    from datetime import datetime
+    meta = {
+        "name": name,
+        "status": "pending",   # pending until keys are split
+        "created": datetime.now().isoformat()
+    }
+    _save_meta(proc_id, meta)
+
+    print(f"\nProcurement '{name}' created successfully (ID: {proc_id})")
+    return proc_id
 
 
 # ==========================================
-# SUBMIT BID
+# SPLIT ADMIN KEY FOR A PROCUREMENT
+# ==========================================
+def split_admin_key(proc_id=None):
+    if proc_id is None:
+        print("No procurement ID provided.")
+        return
+
+    proc_dir = _proc_dir(proc_id)
+    admin_priv_path = os.path.join(proc_dir, "admin_private.pem")
+
+    if not os.path.exists(admin_priv_path):
+        print("Error: Admin key not found for this procurement.")
+        return
+
+    with open(admin_priv_path, "rb") as f:
+        admin_priv_pem = f.read()
+
+    sk = SigningKey.from_pem(admin_priv_pem)
+    raw_key_hex = sk.to_string().hex()
+    shares = HexToHexSecretSharer.split_secret(raw_key_hex, 2, 3)
+
+    os.remove(admin_priv_path)
+
+    meta = _load_meta(proc_id)
+    print("\n" + "=" * 55)
+    print(f"  KEY SPLITTING — {meta['name']}")
+    print("=" * 55)
+    print("  Each share must be given to a DIFFERENT person.")
+    print("  Any 2 of 3 shares can reconstruct the key.")
+    print("  This screen will NOT show these shares again!")
+    print("=" * 55)
+
+    for i, share in enumerate(shares):
+        input(f"\nPress Enter when Keyholder {i+1} is ready...")
+        share_num, share_val = share.split("-", 1)
+        print(f"\n  Keyholder {i+1} — Copy BOTH values carefully:")
+        print(f"   Share Number : {share_num}")
+        print(f"   Share Value  : {share_val}\n")
+        input(f"Keyholder {i+1}: Press Enter once you have saved your share...")
+        print("  Acknowledged.")
+
+    meta["status"] = "open"
+    _save_meta(proc_id, meta)
+
+    print("\n" + "=" * 55)
+    print(f"  '{meta['name']}' is now OPEN for bidding.")
+    print("=" * 55)
+
+
+# ==========================================
+# SUBMIT A BID
 # ==========================================
 def submit_bid():
-    state = get_state()
+    open_procs = list_open_procurements()
 
-    if state["status"] == "none":
-        print("Error: No active procurement session. Please wait for the Admin to initialize.")
+    if not open_procs:
+        print("\nNo procurements are currently open for bidding.")
         return
-    if state["status"] == "closed":
-        print("Error: Bidding is closed. No more bids are being accepted.")
+
+    print("\n--- OPEN PROCUREMENTS ---")
+    for i, p in enumerate(open_procs, 1):
+        print(f"  {i}. {p['name']}")
+
+    choice = input("\nSelect a procurement to bid on (number): ").strip()
+    try:
+        proc = open_procs[int(choice) - 1]
+    except (ValueError, IndexError):
+        print("Invalid selection.")
         return
+
+    proc_id = proc["id"]
+    print(f"\nBidding on: {proc['name']}")
 
     user_id = input("Enter your Student/Company ID: ")
     password = input("Enter your private key password: ")
@@ -96,13 +200,9 @@ def submit_bid():
     if not private_key:
         return
 
-    bid_amount = input("Enter your bid amount (e.g., 500000): ")
+    bid_amount = input("Enter your bid amount (e.g., 500000): ").strip()
 
-    admin_pub_path = os.path.join(ADMIN_KEY_DIR, "admin_public.pem")
-    if not os.path.exists(admin_pub_path):
-        print("Error: Admin public key not found.")
-        return
-
+    admin_pub_path = os.path.join(_proc_dir(proc_id), "admin_public.pem")
     with open(admin_pub_path, "rb") as f:
         admin_public_pem = f.read()
 
@@ -118,38 +218,49 @@ def submit_bid():
         "signature": signature.hex()
     }
 
-    os.makedirs("data", exist_ok=True)
+    bids_path = os.path.join(_proc_dir(proc_id), "bids.json")
     bids = []
-    if os.path.exists(BID_STORAGE):
+    if os.path.exists(bids_path):
         try:
-            with open(BID_STORAGE, "r") as f:
+            with open(bids_path, "r") as f:
                 content = f.read().strip()
                 if content:
                     bids = json.loads(content)
         except json.JSONDecodeError:
-            print("Warning: bids.json was corrupted. Starting a new ledger.")
             bids = []
 
     bids.append(bid_data)
-
-    with open(BID_STORAGE, "w") as f:
+    with open(bids_path, "w") as f:
         json.dump(bids, f, indent=4)
 
-    print(f"Bid submitted and signed successfully!")
+    print(f"\nBid submitted successfully for '{proc['name']}'!")
 
 
 # ==========================================
-# CLOSE BIDDING & DECRYPT
+# CLOSE BIDDING & DECRYPT A PROCUREMENT
 # ==========================================
 def close_bidding_and_decrypt():
-    state = get_state()
+    procs = [p for p in list_procurements() if p["status"] in ("open", "closed")]
 
-    if state["status"] == "none":
-        print("Error: No procurement session has been initialized.")
+    if not procs:
+        print("\nNo active or closed procurements found.")
         return
 
-    print("\n--- RECONSTRUCTING KEY FROM SHARES ---")
-    print("Two keyholders must enter their shares to unlock the bids.\n")
+    print("\n--- SELECT PROCUREMENT TO DECRYPT ---")
+    for i, p in enumerate(procs, 1):
+        status_icon = "🟢" if p["status"] == "open" else "🔴"
+        print(f"  {i}. {status_icon} {p['name']}")
+
+    choice = input("\nSelect a procurement (number): ").strip()
+    try:
+        proc = procs[int(choice) - 1]
+    except (ValueError, IndexError):
+        print("Invalid selection.")
+        return
+
+    proc_id = proc["id"]
+    print(f"\n--- DECRYPTING: {proc['name']} ---")
+    print("Two keyholders must enter their shares.\n")
 
     share1_num = input("Keyholder 1 - Share number (1, 2, or 3): ").strip()
     share1_val = input("Keyholder 1 - Share value: ").strip()
@@ -167,15 +278,16 @@ def close_bidding_and_decrypt():
             recovered_hex = "0" + recovered_hex
         raw_admin_private_key = bytes.fromhex(recovered_hex)
 
-        if not os.path.exists(BID_STORAGE):
-            print("Error: No bids have been submitted yet.")
+        bids_path = os.path.join(_proc_dir(proc_id), "bids.json")
+        if not os.path.exists(bids_path):
+            print("No bids have been submitted for this procurement.")
             return
 
-        with open(BID_STORAGE, "r") as f:
+        with open(bids_path, "r") as f:
             bids = json.load(f)
 
         print(f"\nFound {len(bids)} bid(s). Decrypting...")
-        print("=" * 45)
+        print("=" * 50)
 
         results = []
         for bid in bids:
@@ -188,59 +300,19 @@ def close_bidding_and_decrypt():
             except Exception as e:
                 print(f"  Failed to decrypt bid for {user_id}: {e}")
 
-        print("=" * 45)
+        print("=" * 50)
 
         if results:
             winner = min(results, key=lambda x: x[1])
             print(f"\n  LOWEST BID: {winner[0]} with Rs. {winner[1]:,}")
 
-        print("\nDecryption complete.")
-        set_state("closed")
+        # Mark as closed
+        meta = _load_meta(proc_id)
+        meta["status"] = "closed"
+        _save_meta(proc_id, meta)
+
+        print("\nDecryption complete. Procurement is now CLOSED.")
 
     except Exception as e:
         print(f"\nFailed to reconstruct key: {e}")
-        print("   Make sure both share numbers and values are entered correctly.")
-
-
-# ==========================================
-# SPLIT ADMIN KEY
-# ==========================================
-def split_admin_key():
-    admin_priv_path = os.path.join(ADMIN_KEY_DIR, "admin_private.pem")
-    if not os.path.exists(admin_priv_path):
-        print("Error: Admin key not found. Initialize procurement first.")
-        return
-
-    with open(admin_priv_path, "rb") as f:
-        admin_priv_pem = f.read()
-
-    sk = SigningKey.from_pem(admin_priv_pem)
-    raw_key_hex = sk.to_string().hex()
-
-    shares = HexToHexSecretSharer.split_secret(raw_key_hex, 2, 3)
-
-    os.remove(admin_priv_path)
-
-    print("\n" + "=" * 55)
-    print("  KEY SPLITTING COMPLETE - DISTRIBUTE SHARES NOW")
-    print("=" * 55)
-    print("  Each share must be given to a DIFFERENT person.")
-    print("  Any 2 of 3 shares can reconstruct the key.")
-    print("  This screen will NOT show these shares again!")
-    print("=" * 55)
-
-    for i, share in enumerate(shares):
-        input(f"\nPress Enter when Keyholder {i+1} is ready...")
-        share_num, share_val = share.split("-", 1)
-        print(f"\n  Keyholder {i+1} - Copy BOTH values down carefully:")
-        print(f"   Share Number : {share_num}")
-        print(f"   Share Value  : {share_val}\n")
-        input(f"Keyholder {i+1}: Press Enter once you have saved your share...")
-        print("  Acknowledged.")
-
-    print("\n" + "=" * 55)
-    print("  All shares distributed. Original key destroyed.")
-    print("  Bidding is now OPEN.")
-    print("=" * 55)
-
-    set_state("open")
+        print("  Make sure both share numbers and values are entered correctly.")

@@ -1,6 +1,8 @@
 import sys
+import os
 from setup_user import register_secure_user
-from admin import initialize_procurement, submit_bid, close_bidding_and_decrypt, split_admin_key, get_state, print_status_banner
+from admin import (initialize_procurement, submit_bid, close_bidding_and_decrypt,
+                   split_admin_key, list_procurements, print_status_banner)
 
 
 # ==========================================
@@ -8,23 +10,21 @@ from admin import initialize_procurement, submit_bid, close_bidding_and_decrypt,
 # ==========================================
 def main_menu():
     while True:
-        state = get_state()
-        status = state.get("status", "none")
-
-        if status == "none":
-            status_label = "⚪ No Active Procurement"
-        elif status == "open":
-            status_label = "🟢 Bidding is OPEN"
-        elif status == "closed":
-            status_label = "🔴 Bidding is CLOSED"
+        procs = list_procurements()
+        open_count = sum(1 for p in procs if p["status"] == "open")
+        closed_count = sum(1 for p in procs if p["status"] == "closed")
 
         print("\n" + "=" * 55)
         print("🏛️  CSePS - Government e-Procurement System")
-        print(f"     {status_label}")
         print("=" * 55)
-        print("1. Bidder Portal (Register & Submit Bids)")
-        print("2. Administrator Portal (Setup & Decrypt Bids)")
-        print("3. Exit System")
+        if not procs:
+            print("  No procurements active.")
+        else:
+            print_status_banner()
+        print("=" * 55)
+        print("1. Bidder Portal")
+        print("2. Administrator Portal")
+        print("3. Exit")
         print("=" * 55)
 
         choice = input("Select your role (1-3): ")
@@ -37,7 +37,7 @@ def main_menu():
             print("Exiting CSePS. Goodbye!")
             sys.exit()
         else:
-            print("Invalid choice. Please enter 1, 2, or 3.")
+            print("Invalid choice.")
 
 
 # ==========================================
@@ -45,18 +45,15 @@ def main_menu():
 # ==========================================
 def bidder_menu():
     while True:
-        state = get_state()
-        status = state.get("status", "none")
+        from admin import list_open_procurements
+        open_procs = list_open_procurements()
 
         print("\n--- BIDDER PORTAL ---")
-        print("1. Register New Bidder Identity (Generate Keys)")
-
-        # Only show the bid option when bidding is actually open
-        if status == "open":
-            print("2. Submit a Secure Bid")
+        print("1. Register New Bidder Identity")
+        if open_procs:
+            print(f"2. Submit a Bid  [{len(open_procs)} procurement(s) open]")
         else:
-            print("2. Submit a Secure Bid  [unavailable - bidding is not open]")
-
+            print("2. Submit a Bid  [no open procurements]")
         print("3. Return to Main Menu")
 
         choice = input("Select an option (1-3): ")
@@ -64,15 +61,12 @@ def bidder_menu():
         if choice == '1':
             print("\n--- IDENTITY REGISTRATION ---")
             user_id = input("Enter your Student/Company ID (e.g., S20335): ")
-
             while True:
-                password = input("Create a strong password to lock your private key: ")
-                confirm_password = input("Confirm your password: ")
-                if password == confirm_password:
+                password = input("Create a strong password: ")
+                confirm = input("Confirm your password: ")
+                if password == confirm:
                     break
-                else:
-                    print("Passwords do not match. Please try again.\n")
-
+                print("Passwords do not match. Try again.\n")
             register_secure_user(user_id, password)
 
         elif choice == '2':
@@ -88,37 +82,33 @@ def bidder_menu():
 # ==========================================
 def admin_menu():
     print("\n--- ADMINISTRATOR AUTHENTICATION ---")
-    admin_pin = input("Enter Admin PIN to access portal: ")
+    admin_pin = input("Enter Admin PIN: ")
 
     if admin_pin != "admin123":
-        print("Access Denied. You are not authorized.")
+        print("Access Denied.")
         return
 
     while True:
-        state = get_state()
-        status = state.get("status", "none")
+        procs = list_procurements()
 
         print("\n--- ADMINISTRATOR PORTAL ---")
-
-        if status == "none":
-            print("1. Initialize Procurement")
-            print("2. Close Bidding & Decrypt Ledger  [unavailable - no active session]")
-        elif status == "open":
-            print("1. Initialize Procurement  [WARNING: will reset active session]")
-            print("2. Close Bidding & Decrypt Ledger")
-        elif status == "closed":
-            print("1. Initialize New Procurement")
-            print("2. View Decrypted Results Again")
-
+        print("-" * 45)
+        if not procs:
+            print("  No procurements yet.")
+        else:
+            print_status_banner()
+        print("-" * 45)
+        print("1. Create New Procurement")
+        print("2. Close Bidding & Decrypt a Procurement")
         print("3. Return to Main Menu")
+        print("=" * 45)
 
         choice = input("Select an option (1-3): ")
 
         if choice == '1':
-            initialize_procurement()
-            # Only run key splitting if initialization created a new key
-            if os.path.exists("data/admin/admin_private.pem"):
-                split_admin_key()
+            proc_id = initialize_procurement()
+            if proc_id and os.path.exists(f"data/procurements/{proc_id}/admin_private.pem"):
+                split_admin_key(proc_id)
         elif choice == '2':
             close_bidding_and_decrypt()
         elif choice == '3':
@@ -126,11 +116,6 @@ def admin_menu():
         else:
             print("Invalid choice.")
 
-
-# ==========================================
-# SYSTEM START
-# ==========================================
-import os
 
 if __name__ == "__main__":
     main_menu()
