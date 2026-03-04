@@ -1,16 +1,26 @@
 import sys
-# This pulls the registration function from the file we built earlier!
 from setup_user import register_secure_user
-from admin import initialize_procurement, submit_bid, close_bidding_and_decrypt, split_admin_key
+from admin import initialize_procurement, submit_bid, close_bidding_and_decrypt, split_admin_key, get_state, print_status_banner
 
 
 # ==========================================
-# MAIN MENU (THE FRONT DOOR)
+# MAIN MENU
 # ==========================================
 def main_menu():
     while True:
+        state = get_state()
+        status = state.get("status", "none")
+
+        if status == "none":
+            status_label = "⚪ No Active Procurement"
+        elif status == "open":
+            status_label = "🟢 Bidding is OPEN"
+        elif status == "closed":
+            status_label = "🔴 Bidding is CLOSED"
+
         print("\n" + "=" * 55)
         print("🏛️  CSePS - Government e-Procurement System")
+        print(f"     {status_label}")
         print("=" * 55)
         print("1. Bidder Portal (Register & Submit Bids)")
         print("2. Administrator Portal (Setup & Decrypt Bids)")
@@ -27,17 +37,26 @@ def main_menu():
             print("Exiting CSePS. Goodbye!")
             sys.exit()
         else:
-            print("❌ Invalid choice. Please enter 1, 2, or 3.")
+            print("Invalid choice. Please enter 1, 2, or 3.")
 
 
 # ==========================================
-# BIDDER MENU (UPDATED WITH VERIFICATION)
+# BIDDER MENU
 # ==========================================
 def bidder_menu():
     while True:
-        print("\n--- 👤 BIDDER PORTAL ---")
+        state = get_state()
+        status = state.get("status", "none")
+
+        print("\n--- BIDDER PORTAL ---")
         print("1. Register New Bidder Identity (Generate Keys)")
-        print("2. Submit a Secure Bid")
+
+        # Only show the bid option when bidding is actually open
+        if status == "open":
+            print("2. Submit a Secure Bid")
+        else:
+            print("2. Submit a Secure Bid  [unavailable - bidding is not open]")
+
         print("3. Return to Main Menu")
 
         choice = input("Select an option (1-3): ")
@@ -46,60 +65,72 @@ def bidder_menu():
             print("\n--- IDENTITY REGISTRATION ---")
             user_id = input("Enter your Student/Company ID (e.g., S20335): ")
 
-            # NEW: Password Verification Loop
             while True:
                 password = input("Create a strong password to lock your private key: ")
                 confirm_password = input("Confirm your password: ")
-
                 if password == confirm_password:
-                    # Passwords match! Break out of the loop and continue.
                     break
                 else:
-                    # Passwords failed to match. The loop restarts.
-                    print("❌ Passwords do not match. Please try again.\n")
+                    print("Passwords do not match. Please try again.\n")
 
-            # We only reach this line if the passwords matched perfectly
             register_secure_user(user_id, password)
 
         elif choice == '2':
             submit_bid()
         elif choice == '3':
-            break  # This breaks out of the Bidder Menu and returns to the Main Menu
+            break
         else:
-            print("❌ Invalid choice.")
+            print("Invalid choice.")
+
+
 # ==========================================
 # ADMINISTRATOR MENU
 # ==========================================
 def admin_menu():
-    print("\n--- 🛡️ ADMINISTRATOR AUTHENTICATION ---")
+    print("\n--- ADMINISTRATOR AUTHENTICATION ---")
     admin_pin = input("Enter Admin PIN to access portal: ")
 
-    # Layer 1 Security: Only allow access if they know the secret PIN
     if admin_pin != "admin123":
-        print("❌ Access Denied. You are not authorized.")
-        return  # Kicks them immediately back to the Main Menu
+        print("Access Denied. You are not authorized.")
+        return
 
     while True:
-        print("\n--- 🛡️ ADMINISTRATOR PORTAL ---")
-        print("1. Initialize Procurement (Create Bidding Item & Admin Keys)")
-        print("2. Close Bidding & Decrypt Ledger")
+        state = get_state()
+        status = state.get("status", "none")
+
+        print("\n--- ADMINISTRATOR PORTAL ---")
+
+        if status == "none":
+            print("1. Initialize Procurement")
+            print("2. Close Bidding & Decrypt Ledger  [unavailable - no active session]")
+        elif status == "open":
+            print("1. Initialize Procurement  [WARNING: will reset active session]")
+            print("2. Close Bidding & Decrypt Ledger")
+        elif status == "closed":
+            print("1. Initialize New Procurement")
+            print("2. View Decrypted Results Again")
+
         print("3. Return to Main Menu")
 
         choice = input("Select an option (1-3): ")
 
         if choice == '1':
             initialize_procurement()
-            split_admin_key()
+            # Only run key splitting if initialization created a new key
+            if os.path.exists("data/admin/admin_private.pem"):
+                split_admin_key()
         elif choice == '2':
             close_bidding_and_decrypt()
         elif choice == '3':
-            break  # Returns to Main Menu
+            break
         else:
-            print("❌ Invalid choice.")
+            print("Invalid choice.")
 
 
 # ==========================================
 # SYSTEM START
 # ==========================================
+import os
+
 if __name__ == "__main__":
     main_menu()
