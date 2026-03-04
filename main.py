@@ -2,17 +2,20 @@ import sys
 import os
 from setup_user import register_secure_user
 from admin import (initialize_procurement, submit_bid, close_bidding_and_decrypt,
-                   split_admin_key, list_procurements, print_status_banner)
+                   split_admin_key, list_procurements, print_status_banner,
+                   admin_pin_exists, setup_admin_pin, verify_admin_pin)
 
 
 # ==========================================
 # MAIN MENU
 # ==========================================
 def main_menu():
+    # First-run: create config.env if it doesn't exist yet
+    if not admin_pin_exists():
+        setup_admin_pin()  # creates config.env and exits with instructions
+
     while True:
         procs = list_procurements()
-        open_count = sum(1 for p in procs if p["status"] == "open")
-        closed_count = sum(1 for p in procs if p["status"] == "closed")
 
         print("\n" + "=" * 55)
         print("🏛️  CSePS - Government e-Procurement System")
@@ -60,7 +63,7 @@ def bidder_menu():
 
         if choice == '1':
             print("\n--- IDENTITY REGISTRATION ---")
-            user_id = input("Enter your Student/Company ID (e.g., S20335): ")
+            user_id = input("Enter your Student/Company ID (e.g., S20335): ").strip()
             while True:
                 password = input("Create a strong password: ")
                 confirm = input("Confirm your password: ")
@@ -82,10 +85,10 @@ def bidder_menu():
 # ==========================================
 def admin_menu():
     print("\n--- ADMINISTRATOR AUTHENTICATION ---")
-    admin_pin = input("Enter Admin PIN: ")
+    pin = input("Enter Admin PIN: ").strip()
 
-    if admin_pin != "admin123":
-        print("Access Denied.")
+    if not verify_admin_pin(pin):
+        print("Access Denied. Incorrect PIN.")
         return
 
     while True:

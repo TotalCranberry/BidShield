@@ -1,24 +1,75 @@
 import os
+import re
 import json
+from datetime import datetime
 from ecies import encrypt, decrypt
 from ecdsa import VerifyingKey, SigningKey
 from secretsharing import HexToHexSecretSharer
-from crypto_engine import sign_message, create_keys
+from crypto_engine import sign_message, create_keys, check_signature
 from setup_user import load_private_key
 
 DATA_DIR = "data/procurements"
+CONFIG_FILE = "config.env"
+CONFIG_PIN_KEY = "ADMIN_PIN"
+KEY_DIR = "data/keys"
+
+
+# ==========================================
+# ADMIN PIN SYSTEM
+# PIN is read from config.env or the ADMIN_PIN environment variable.
+# config.env format (one key=value per line):
+#   ADMIN_PIN=yourpin
+# ==========================================
+def _load_config():
+    """Load key=value pairs from config.env into a dict."""
+    config = {}
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, value = line.partition("=")
+                    config[key.strip()] = value.strip()
+    return config
+
+def verify_admin_pin(pin):
+    """Check pin against config.env, then ADMIN_PIN environment variable."""
+    config = _load_config()
+    if CONFIG_PIN_KEY in config:
+        return pin == config[CONFIG_PIN_KEY]
+    env_pin = os.environ.get(CONFIG_PIN_KEY)
+    if env_pin:
+        return pin == env_pin
+    return False
+
+def admin_pin_exists():
+    """Returns True if a PIN is configured in config.env or environment."""
+    config = _load_config()
+    return CONFIG_PIN_KEY in config or CONFIG_PIN_KEY in os.environ
+
+def setup_admin_pin():
+    """Create a default config.env with instructions if it does not exist."""
+    if os.path.exists(CONFIG_FILE):
+        return
+    with open(CONFIG_FILE, "w") as f:
+        f.write("# CSePS Configuration File\n")
+        f.write("# Set the Admin PIN below. Keep this file private and out of git.\n")
+        f.write("#\n")
+        f.write("ADMIN_PIN=changeme\n")
+    print("\n" + "=" * 55)
+    print("  CONFIG FILE CREATED: config.env")
+    print("=" * 55)
+    print("  Open config.env and change ADMIN_PIN to a strong value.")
+    print("  Keep this file private — never commit it to version control.")
+    print("  Then restart the program.")
+    print("=" * 55)
+    import sys
+    sys.exit(0)
 
 
 # ==========================================
 # PROCUREMENT REGISTRY HELPERS
-# Each procurement lives in its own folder:
-#   data/procurements/<proc_id>/
-#       meta.json          (name, status, created)
-#       admin_public.pem   (used by bidders to encrypt)
-#       admin_private.pem  (deleted after key split)
-#       bids.json          (encrypted bid ledger)
 # ==========================================
-
 def _proc_dir(proc_id):
     return os.path.join(DATA_DIR, proc_id)
 
@@ -34,7 +85,6 @@ def _save_meta(proc_id, meta):
         json.dump(meta, f, indent=4)
 
 def list_procurements():
-    """Return list of all procurement meta dicts, sorted by creation time."""
     if not os.path.exists(DATA_DIR):
         return []
     procs = []
@@ -51,7 +101,6 @@ def list_open_procurements():
     return [p for p in list_procurements() if p["status"] == "open"]
 
 def get_state():
-    """Legacy-compatible: summarise overall system state for main menu banner."""
     procs = list_procurements()
     if not procs:
         return {"status": "none"}
@@ -67,13 +116,8 @@ def print_status_banner():
         print("  No procurements created yet.")
         return
     for p in procs:
-        if p["status"] == "open":
-            icon = "🟢"
-        elif p["status"] == "closed":
-            icon = "🔴"
-        else:
-            icon = "⚪"
-        print(f"  {icon} [{p['id']}] {p['name']}  ({p['status'].upper()})")
+        icon = {"open": "🟢", "closed": "🔴", "pending": "⚪"}.get(p["status"], "⚪")
+        print(f"  {icon} {p['name']}  ({p['status'].upper()})")
 
 
 # ==========================================
@@ -85,42 +129,34 @@ def initialize_procurement():
     name = input("Enter a name for this procurement (e.g. 'Road Construction Tender'): ").strip()
     if not name:
         print("Procurement name cannot be empty.")
-        return
+        return None
 
-    # Build a safe folder ID from the name
-    import re
-    from datetime import datetime
     safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", name)[:30]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     proc_id = f"{safe_id}_{timestamp}"
     proc_dir = _proc_dir(proc_id)
-
     os.makedirs(proc_dir, exist_ok=True)
 
-    # Generate keys
     admin_private, admin_public = create_keys()
 
     with open(os.path.join(proc_dir, "admin_public.pem"), "wb") as f:
         f.write(admin_public.to_pem())
-
     with open(os.path.join(proc_dir, "admin_private.pem"), "wb") as f:
         f.write(admin_private.to_pem())
 
-    # Save metadata
-    from datetime import datetime
     meta = {
         "name": name,
-        "status": "pending",   # pending until keys are split
+        "status": "pending",
         "created": datetime.now().isoformat()
     }
     _save_meta(proc_id, meta)
 
-    print(f"\nProcurement '{name}' created successfully (ID: {proc_id})")
+    print(f"\nProcurement '{name}' created successfully.")
     return proc_id
 
 
 # ==========================================
-# SPLIT ADMIN KEY FOR A PROCUREMENT
+# SPLIT ADMIN KEY
 # ==========================================
 def split_admin_key(proc_id=None):
     if proc_id is None:
@@ -140,7 +176,6 @@ def split_admin_key(proc_id=None):
     sk = SigningKey.from_pem(admin_priv_pem)
     raw_key_hex = sk.to_string().hex()
     shares = HexToHexSecretSharer.split_secret(raw_key_hex, 2, 3)
-
     os.remove(admin_priv_path)
 
     meta = _load_meta(proc_id)
@@ -193,14 +228,44 @@ def submit_bid():
     proc_id = proc["id"]
     print(f"\nBidding on: {proc['name']}")
 
-    user_id = input("Enter your Student/Company ID: ")
+    user_id = input("Enter your Student/Company ID: ").strip()
     password = input("Enter your private key password: ")
 
     private_key = load_private_key(user_id, password)
     if not private_key:
         return
 
+    # ── Duplicate bid check ──────────────────────────────
+    bids_path = os.path.join(_proc_dir(proc_id), "bids.json")
+    bids = []
+    if os.path.exists(bids_path):
+        try:
+            with open(bids_path, "r") as f:
+                content = f.read().strip()
+                if content:
+                    bids = json.loads(content)
+        except json.JSONDecodeError:
+            bids = []
+
+    existing_index = next((i for i, b in enumerate(bids) if b["user_id"] == user_id), None)
+    if existing_index is not None:
+        print(f"\nWarning: You have already submitted a bid for '{proc['name']}'.")
+        replace = input("Do you want to replace your existing bid? (yes/no): ").strip().lower()
+        if replace != "yes":
+            print("Bid submission cancelled. Your original bid stands.")
+            return
+        # Remove the old bid — it will be replaced below
+        bids.pop(existing_index)
+        print("Previous bid removed. Submitting new bid...")
+
     bid_amount = input("Enter your bid amount (e.g., 500000): ").strip()
+
+    # Validate it's a number
+    try:
+        int(bid_amount)
+    except ValueError:
+        print("Error: Bid amount must be a whole number.")
+        return
 
     admin_pub_path = os.path.join(_proc_dir(proc_id), "admin_public.pem")
     with open(admin_pub_path, "rb") as f:
@@ -218,17 +283,6 @@ def submit_bid():
         "signature": signature.hex()
     }
 
-    bids_path = os.path.join(_proc_dir(proc_id), "bids.json")
-    bids = []
-    if os.path.exists(bids_path):
-        try:
-            with open(bids_path, "r") as f:
-                content = f.read().strip()
-                if content:
-                    bids = json.loads(content)
-        except json.JSONDecodeError:
-            bids = []
-
     bids.append(bid_data)
     with open(bids_path, "w") as f:
         json.dump(bids, f, indent=4)
@@ -237,7 +291,7 @@ def submit_bid():
 
 
 # ==========================================
-# CLOSE BIDDING & DECRYPT A PROCUREMENT
+# CLOSE BIDDING & DECRYPT
 # ==========================================
 def close_bidding_and_decrypt():
     procs = [p for p in list_procurements() if p["status"] in ("open", "closed")]
@@ -248,8 +302,8 @@ def close_bidding_and_decrypt():
 
     print("\n--- SELECT PROCUREMENT TO DECRYPT ---")
     for i, p in enumerate(procs, 1):
-        status_icon = "🟢" if p["status"] == "open" else "🔴"
-        print(f"  {i}. {status_icon} {p['name']}")
+        icon = "🟢" if p["status"] == "open" else "🔴"
+        print(f"  {i}. {icon} {p['name']}")
 
     choice = input("\nSelect a procurement (number): ").strip()
     try:
@@ -286,31 +340,41 @@ def close_bidding_and_decrypt():
         with open(bids_path, "r") as f:
             bids = json.load(f)
 
-        print(f"\nFound {len(bids)} bid(s). Decrypting...")
-        print("=" * 50)
+        print(f"\nFound {len(bids)} bid(s). Decrypting and verifying...")
+        print("=" * 58)
 
         results = []
         for bid in bids:
             user_id = bid['user_id']
             try:
+                # Decrypt the bid amount
                 encrypted_bytes = bytes.fromhex(bid['encrypted_bid'])
                 decrypted_amount = decrypt(raw_admin_private_key, encrypted_bytes).decode()
+
+                # Verify the signature against the bidder's public key
+                pub_key_path = os.path.join(KEY_DIR, f"{user_id}_public.pem")
+                sig_status = "⚠️  No key"
+                if os.path.exists(pub_key_path):
+                    with open(pub_key_path, "rb") as f:
+                        bidder_pub = VerifyingKey.from_pem(f.read())
+                    sig_bytes = bytes.fromhex(bid['signature'])
+                    valid = check_signature(bidder_pub, sig_bytes, decrypted_amount)
+                    sig_status = "✅ Valid" if valid else "❌ INVALID"
+
                 results.append((user_id, int(decrypted_amount)))
-                print(f"  Bidder: {user_id:<15} | Amount: Rs. {int(decrypted_amount):,}")
+                print(f"  Bidder: {user_id:<15} | Rs. {int(decrypted_amount):>12,} | Sig: {sig_status}")
             except Exception as e:
                 print(f"  Failed to decrypt bid for {user_id}: {e}")
 
-        print("=" * 50)
+        print("=" * 58)
 
         if results:
             winner = min(results, key=lambda x: x[1])
-            print(f"\n  LOWEST BID: {winner[0]} with Rs. {winner[1]:,}")
+            print(f"\n  🏆 LOWEST BID: {winner[0]} with Rs. {winner[1]:,}")
 
-        # Mark as closed
         meta = _load_meta(proc_id)
         meta["status"] = "closed"
         _save_meta(proc_id, meta)
-
         print("\nDecryption complete. Procurement is now CLOSED.")
 
     except Exception as e:
